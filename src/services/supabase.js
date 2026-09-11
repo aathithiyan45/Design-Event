@@ -555,3 +555,178 @@ export const clearAllParticipantsService = async () => {
     return { error };
   }
 };
+
+/**
+ * Admin: Delete an individual participant by Register / Roll Number
+ */
+export const deleteParticipantService = async (rollNumber) => {
+  const formattedRoll = (rollNumber || '').trim().toUpperCase();
+  if (!formattedRoll) {
+    return { error: new Error('Register Number is required for deletion.') };
+  }
+
+  try {
+    // 1. Primary path: Call the secure database RPC function
+    const { data: rpcData, error: rpcError } = await supabase.rpc('delete_participant_by_roll', {
+      p_roll_number: formattedRoll
+    });
+
+    const isRpcMissing = rpcError && (
+      rpcError.status === 404 ||
+      rpcError.code === 'PGRST202' ||
+      rpcError.message?.includes('Could not find') ||
+      rpcError.message?.includes('does not exist') ||
+      rpcError.message?.includes('404')
+    );
+
+    if (rpcError && !isRpcMissing) {
+      return { error: new Error(rpcError.message || 'Failed to delete participant.') };
+    }
+
+    if (rpcData) {
+      if (rpcData.success) {
+        return { data: rpcData, error: null };
+      }
+      return { error: new Error(rpcData.error || 'Failed to delete participant.') };
+    }
+
+    // 2. Fallback path for offline/mock environments if RPC is missing
+    const { data: participant, error: findErr } = await supabase
+      .from('participants')
+      .select('id, roll_number')
+      .eq('roll_number', formattedRoll)
+      .maybeSingle();
+
+    if (findErr) {
+      return { error: findErr };
+    }
+
+    if (!participant) {
+      return { error: new Error(`Participant with Register Number "${formattedRoll}" was not found.`) };
+    }
+
+    const pId = participant.id;
+
+    // Delete task_results
+    const { data: subData } = await supabase.from('submissions').select('id').eq('participant_id', pId);
+    const subIds = (subData || []).map(s => s.id);
+    if (subIds.length > 0) {
+      await supabase.from('task_results').delete().in('submission_id', subIds);
+    }
+
+    // Delete submissions
+    await supabase.from('submissions').delete().eq('participant_id', pId);
+
+    // Delete participant record
+    const { error: deleteErr } = await supabase.from('participants').delete().eq('id', pId);
+    if (deleteErr) {
+      return { error: deleteErr };
+    }
+
+    return { data: { success: true, deleted_roll_number: formattedRoll }, error: null };
+  } catch (error) {
+    console.error('Error deleting participant:', error);
+    return { error };
+  }
+};
+
+/**
+ * Native CSV Parser (Zero dependencies)
+ * Handles quoted strings with commas (e.g. "Arun, Kumar"), escaped quotes (""), CRLF/LF line endings, and UTF-8.
+ */
+export const parseCSVText = (text) => {
+  const lines = [];
+  let currentLine = [];
+  let currentField = '';
+  let insideQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (char === '"') {
+      if (insideQuotes && nextChar === '"') {
+        currentField += '"';
+        i++;
+      } else {
+        insideQuotes = !insideQuotes;
+      }
+    } else if (char === ',' && !insideQuotes) {
+      currentLine.push(currentField);
+      currentField = '';
+    } else if ((char === '\r' || char === '\n') && !insideQuotes) {
+      if (char === '\r' && nextChar === '\n') {
+        i++;
+      }
+      currentLine.push(currentField);
+      lines.push(currentLine);
+      currentLine = [];
+      currentField = '';
+    } else {
+      currentField += char;
+    }
+  }
+
+  if (currentField || currentLine.length > 0) {
+    currentLine.push(currentField);
+    lines.push(currentLine);
+  }
+
+  return lines.filter(row => row.some(cell => cell.trim().length > 0));
+};
+
+/**
+ * Admin: Bulk import valid participants via RPC function with fallback
+ */
+export const bulkImportParticipantsService = async (validParticipants) => {
+  if (!Array.isArray(validParticipants) || validParticipants.length === 0) {
+    return { data: { success: true, imported: 0, skipped: 0 }, error: null };
+  }
+
+  try {
+    // 1. Primary path: Call the secure database RPC function
+    const { data: rpcData, error: rpcError } = await supabase.rpc('bulk_import_participants', {
+      p_participants: validParticipants
+    });
+
+    const isRpcMissing = rpcError && (
+      rpcError.status === 404 ||
+      rpcError.code === 'PGRST202' ||
+      rpcError.message?.includes('Could not find') ||
+      rpcError.message?.includes('does not exist') ||
+      rpcError.message?.includes('404')
+    );
+
+    if (rpcError && !isRpcMissing) {
+      return { error: new Error(rpcError.message || 'Failed to bulk import participants.') };
+    }
+
+    if (rpcData && rpcData.success) {
+      return { data: rpcData, error: null };
+    }
+
+    // 2. Fallback path for offline/mock environments: Sequential import
+    let imported = 0;
+    let skipped = 0;
+
+    for (const p of validParticipants) {
+      const { error } = await addParticipantService({
+        rollNumber: p.roll_number,
+        name: p.name,
+        year: p.year
+      });
+      if (error) {
+        skipped++;
+      } else {
+        imported++;
+      }
+    }
+
+    return { data: { success: true, imported, skipped }, error: null };
+  } catch (error) {
+    console.error('Error bulk importing participants:', error);
+    return { error };
+  }
+};
+
+

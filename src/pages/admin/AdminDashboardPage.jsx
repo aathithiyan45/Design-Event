@@ -8,6 +8,9 @@ import {
   resetRound1DataService, 
   addParticipantService,
   clearAllParticipantsService,
+  deleteParticipantService,
+  parseCSVText,
+  bulkImportParticipantsService,
   supabase 
 } from '../../services/supabase';
 import { 
@@ -15,6 +18,8 @@ import {
   CheckCircle2, 
   Clock, 
   Download, 
+  Upload,
+  FileText,
   RefreshCw, 
   LogOut, 
   Power, 
@@ -69,6 +74,200 @@ const AdminDashboardPage = () => {
   const [addError, setAddError] = useState('');
   const [addSuccess, setAddSuccess] = useState('');
   const [isSubmittingParticipant, setIsSubmittingParticipant] = useState(false);
+
+  // Individual Delete Participant Modal State
+  const [selectedParticipantForDelete, setSelectedParticipantForDelete] = useState(null);
+  const [isDeletingParticipant, setIsDeletingParticipant] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteSuccess, setDeleteSuccess] = useState('');
+
+  const handleDeleteParticipant = async () => {
+    if (!selectedParticipantForDelete) return;
+    setDeleteError('');
+    setDeleteSuccess('');
+    setIsDeletingParticipant(true);
+
+    const { error } = await deleteParticipantService(selectedParticipantForDelete.roll_number);
+    setIsDeletingParticipant(false);
+
+    if (error) {
+      setDeleteError(error.message || 'Failed to delete participant.');
+    } else {
+      setDeleteSuccess(`Participant ${selectedParticipantForDelete.name} (${selectedParticipantForDelete.roll_number}) deleted successfully.`);
+      await fetchDashboardData();
+      setTimeout(() => {
+        setSelectedParticipantForDelete(null);
+        setDeleteSuccess('');
+      }, 1000);
+    }
+  };
+
+  // CSV Import Modal State
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const [parsedRows, setParsedRows] = useState([]);
+  const [isParsingCSV, setIsParsingCSV] = useState(false);
+  const [isImportingBulk, setIsImportingBulk] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [importResultSummary, setImportResultSummary] = useState(null);
+
+  const handleCSVFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportFile(file);
+    setImportError('');
+    setImportResultSummary(null);
+    setIsParsingCSV(true);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target.result;
+        const rows = parseCSVText(text);
+
+        if (rows.length < 2) {
+          setImportError('CSV file is empty or missing data rows.');
+          setParsedRows([]);
+          setIsParsingCSV(false);
+          return;
+        }
+
+        // Header mapping
+        const headers = rows[0].map(h => h.trim().toLowerCase());
+        const rollIdx = headers.findIndex(h => h === 'roll_number' || h === 'register_number' || h === 'roll' || h === 'reg_no');
+        const nameIdx = headers.findIndex(h => h === 'name' || h === 'full_name' || h === 'participant_name');
+        const yearIdx = headers.findIndex(h => h === 'year' || h === 'year_of_study');
+
+        if (rollIdx === -1 || nameIdx === -1) {
+          setImportError('Invalid CSV Header. Required columns: "roll_number", "name", "year"');
+          setParsedRows([]);
+          setIsParsingCSV(false);
+          return;
+        }
+
+        // Existing DB roll numbers set
+        const existingRolls = new Set(leaderboard.map(p => p.roll_number.toUpperCase()));
+        const seenInCSV = new Set();
+        const processed = [];
+
+        for (let i = 1; i < rows.length; i++) {
+          const rowData = rows[i];
+          const rawRoll = (rowData[rollIdx] || '').trim();
+          const rawName = (rowData[nameIdx] || '').trim();
+          const rawYear = yearIdx !== -1 ? (rowData[yearIdx] || '').trim() : '2';
+
+          const formattedRoll = rawRoll.toUpperCase();
+          const numRoll = Number(formattedRoll);
+          const numYear = parseInt(rawYear, 10) || 2;
+
+          let status = 'VALID';
+          let reason = 'Ready to import';
+
+          // 1. Roll Number Validation
+          if (!rawRoll) {
+            status = 'INVALID';
+            reason = 'Roll Number is required';
+          } else if (isNaN(numRoll) || !((numRoll >= 274001 && numRoll <= 274070) || (numRoll >= 284001 && numRoll <= 284070))) {
+            status = 'INVALID';
+            reason = 'Roll Number outside allowed range (274001-274070, 284001-284070)';
+          }
+          // 2. Name Validation
+          else if (!rawName) {
+            status = 'INVALID';
+            reason = 'Participant Name is required';
+          }
+          // 3. Year Validation
+          else if (isNaN(numYear) || numYear < 1 || numYear > 4) {
+            status = 'INVALID';
+            reason = 'Invalid Year of Study (must be 2 or 3)';
+          }
+          // 4. Duplicate Check inside CSV
+          else if (seenInCSV.has(formattedRoll)) {
+            status = 'DUPLICATE';
+            reason = 'Duplicate Roll Number in uploaded CSV';
+          }
+          // 5. Existing DB Check
+          else if (existingRolls.has(formattedRoll)) {
+            status = 'ALREADY REGISTERED';
+            reason = 'Participant already registered in database';
+          }
+
+          if (status === 'VALID') {
+            seenInCSV.add(formattedRoll);
+          }
+
+          processed.push({
+            rowNum: i + 1,
+            roll_number: formattedRoll || rawRoll,
+            name: rawName,
+            year: numYear,
+            status,
+            reason
+          });
+        }
+
+        setParsedRows(processed);
+      } catch (err) {
+        setImportError('Failed to parse CSV file: ' + err.message);
+        setParsedRows([]);
+      } finally {
+        setIsParsingCSV(false);
+      }
+    };
+
+    reader.onerror = () => {
+      setImportError('Error reading CSV file.');
+      setIsParsingCSV(false);
+    };
+
+    reader.readAsText(file);
+  };
+
+  const handleBulkImportSubmit = async () => {
+    const validItems = parsedRows
+      .filter(r => r.status === 'VALID')
+      .map(r => ({
+        roll_number: r.roll_number,
+        name: r.name,
+        year: r.year
+      }));
+
+    if (validItems.length === 0) {
+      setImportError('No valid participants available for import.');
+      return;
+    }
+
+    setIsImportingBulk(true);
+    setImportError('');
+
+    const { data, error } = await bulkImportParticipantsService(validItems);
+    setIsImportingBulk(false);
+
+    if (error) {
+      setImportError(error.message || 'Failed to complete bulk import.');
+    } else {
+      const importedCount = data?.imported || validItems.length;
+      const alreadyRegCount = parsedRows.filter(r => r.status === 'ALREADY REGISTERED').length;
+      const duplicateCount = parsedRows.filter(r => r.status === 'DUPLICATE').length;
+      const invalidCount = parsedRows.filter(r => r.status === 'INVALID').length;
+
+      setImportResultSummary({
+        imported: importedCount,
+        alreadyRegistered: alreadyRegCount,
+        duplicates: duplicateCount,
+        invalid: invalidCount
+      });
+
+      await fetchDashboardData();
+      setTimeout(() => {
+        setShowImportModal(false);
+        setImportFile(null);
+        setParsedRows([]);
+        setImportResultSummary(null);
+      }, 2500);
+    }
+  };
 
   const fetchDashboardData = async () => {
     setLoading(true);
@@ -403,6 +602,21 @@ const AdminDashboardPage = () => {
             >
               <UserPlus size={14} />
               Add Participant
+            </button>
+
+            <button
+              onClick={() => {
+                setImportError('');
+                setImportFile(null);
+                setParsedRows([]);
+                setImportResultSummary(null);
+                setShowImportModal(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-xs font-semibold text-emerald-700 rounded-full transition cursor-pointer shadow-sm"
+              title="Import participants in bulk from CSV file"
+            >
+              <Upload size={14} />
+              Import Participants
             </button>
 
             <button
@@ -764,6 +978,21 @@ const AdminDashboardPage = () => {
                 <span>Add Participant</span>
               </button>
 
+              <button
+                onClick={() => {
+                  setImportError('');
+                  setImportFile(null);
+                  setParsedRows([]);
+                  setImportResultSummary(null);
+                  setShowImportModal(true);
+                }}
+                className="flex items-center gap-2 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-xs font-semibold text-emerald-700 rounded-full transition cursor-pointer shadow-sm"
+                title="Import participants in bulk from CSV file"
+              >
+                <Upload size={14} />
+                <span>Import Participants</span>
+              </button>
+
 
               <div className="relative flex-1 md:w-56">
                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9CA3AF]" />
@@ -818,12 +1047,13 @@ const AdminDashboardPage = () => {
                   <th className="py-3.5 px-4 text-center">Speed (Time Taken)</th>
                   <th className="py-3.5 px-4 text-right">Score (/100)</th>
                   <th className="py-3.5 px-4 text-center">Status</th>
+                  <th className="py-3.5 px-4 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#F1F1F1]">
                 {filteredLeaderboard.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-[#9CA3AF] space-y-2">
+                    <td colSpan={8} className="py-12 text-center text-[#9CA3AF] space-y-2">
                       <Clock size={28} className="mx-auto text-[#D1D5DB]" />
                       <p className="text-sm font-semibold text-[#111827]">No participant records found</p>
                       <p className="text-xs text-[#9CA3AF]">
@@ -901,6 +1131,23 @@ const AdminDashboardPage = () => {
                           }`}>
                             {p.status}
                           </span>
+                        </td>
+
+                        {/* Action */}
+                        <td className="py-3.5 px-4 text-center">
+                          <button
+                            onClick={() => {
+                              setDeleteError('');
+                              setDeleteSuccess('');
+                              setSelectedParticipantForDelete(p);
+                            }}
+                            disabled={isDeletingParticipant && selectedParticipantForDelete?.roll_number === p.roll_number}
+                            className="px-2.5 py-1 rounded-md text-red-500 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5 font-semibold text-xs"
+                            title={`Delete participant ${p.roll_number}`}
+                          >
+                            <Trash2 size={13} className="shrink-0" />
+                            <span>Delete</span>
+                          </button>
                         </td>
                       </tr>
                     );
@@ -1045,7 +1292,376 @@ const AdminDashboardPage = () => {
         </div>
       )}
 
+      {/* DELETE INDIVIDUAL PARTICIPANT MODAL */}
+      {selectedParticipantForDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="relative w-full max-w-md">
+            <div className="relative bg-white border border-[#E5E7EB] rounded-2xl shadow-2xl overflow-hidden">
+              
+              {/* Modal Header */}
+              <div className="px-6 py-4 border-b border-[#F1F1F1] flex items-center justify-between bg-red-50/50">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-red-100 text-red-600 flex items-center justify-center shadow-sm">
+                    <Trash2 size={16} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-[#111827]">Delete Participant</h3>
+                    <p className="text-xs text-red-600 font-medium">Confirmation Required</p>
+                  </div>
+                </div>
 
+                <button
+                  onClick={() => setSelectedParticipantForDelete(null)}
+                  disabled={isDeletingParticipant}
+                  className="p-1.5 rounded-full text-[#9CA3AF] hover:text-[#111827] hover:bg-white transition cursor-pointer disabled:opacity-50"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 space-y-4">
+                
+                {deleteError && (
+                  <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs font-medium flex items-center gap-2">
+                    <AlertCircle size={16} className="shrink-0" />
+                    <span>{deleteError}</span>
+                  </div>
+                )}
+
+                {deleteSuccess && (
+                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-medium flex items-center gap-2">
+                    <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />
+                    <span>{deleteSuccess}</span>
+                  </div>
+                )}
+
+                {/* Target Participant Summary Card */}
+                <div className="p-3.5 bg-[#F9FAFB] rounded-xl border border-[#E5E7EB] space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-mono font-bold text-[#111827]">
+                      {selectedParticipantForDelete.roll_number}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide border ${
+                      selectedParticipantForDelete.status === 'submitted'
+                        ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
+                        : selectedParticipantForDelete.status === 'started'
+                        ? 'bg-amber-50 text-amber-600 border-amber-200'
+                        : 'bg-gray-100 text-gray-500 border-gray-200'
+                    }`}>
+                      {selectedParticipantForDelete.status}
+                    </span>
+                  </div>
+                  <div className="text-xs font-semibold text-[#374151]">
+                    {selectedParticipantForDelete.name}
+                  </div>
+                  <div className="text-[11px] text-[#6B7280]">
+                    {selectedParticipantForDelete.year ? `${selectedParticipantForDelete.year}nd/rd Year` : '2nd Year'}
+                    {selectedParticipantForDelete.final_score > 0 && ` • Score: ${Number(selectedParticipantForDelete.final_score).toFixed(1)} pts`}
+                  </div>
+                </div>
+
+                {/* Status-specific warning messages */}
+                {selectedParticipantForDelete.status === 'started' && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs space-y-1">
+                    <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                      <span>⚠️ Active Session In Progress!</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800 leading-relaxed">
+                      Participant is currently attempting the test. Deleting this participant will terminate their active session and unlock their device.
+                    </p>
+                  </div>
+                )}
+
+                {selectedParticipantForDelete.status === 'submitted' && (
+                  <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs space-y-1">
+                    <div className="font-bold flex items-center gap-1.5 text-red-900">
+                      <span>⚠️ Submission Recorded!</span>
+                    </div>
+                    <p className="text-[11px] text-red-800 leading-relaxed">
+                      Participant has submitted their poster (Score: {Number(selectedParticipantForDelete.final_score).toFixed(1)} pts). Deleting will permanently erase their submission, scores, and task results.
+                    </p>
+                  </div>
+                )}
+
+                {/* Scope confirmation note */}
+                <div className="text-xs text-[#374151] space-y-1">
+                  <p className="font-medium">
+                    Are you sure you want to delete participant <strong className="text-[#111827]">{selectedParticipantForDelete.roll_number}</strong>?
+                  </p>
+                  <p className="text-[11px] text-[#6B7280] bg-blue-50/60 border border-blue-100 p-2 rounded-lg text-blue-700">
+                    ℹ️ <strong>Scope Notice:</strong> This action affects <strong>ONLY</strong> this participant ({selectedParticipantForDelete.roll_number}). No other participants will be modified or deleted.
+                  </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="pt-3 border-t border-[#F1F1F1] flex items-center justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedParticipantForDelete(null)}
+                    disabled={isDeletingParticipant}
+                    className="px-4 py-2 bg-[#F3F4F6] hover:bg-[#E5E7EB] text-xs font-semibold text-[#374151] rounded-full transition cursor-pointer disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDeleteParticipant}
+                    disabled={isDeletingParticipant}
+                    className="px-5 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-xs font-semibold text-white rounded-full shadow-md shadow-red-500/25 transition-all cursor-pointer flex items-center gap-2 active:scale-[0.98]"
+                  >
+                    {isDeletingParticipant ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                        Deleting...
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 size={14} />
+                        Confirm Delete
+                      </>
+                    )}
+                  </button>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+
+      {/* BULK CSV IMPORT MODAL */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col bg-white border border-[#E5E7EB] rounded-2xl shadow-2xl overflow-hidden">
+            
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-[#F1F1F1] flex items-center justify-between bg-[#F9FAFB] shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500 text-white flex items-center justify-center shadow-sm shadow-emerald-500/20">
+                  <Upload size={16} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#111827]">Import Participants from CSV</h3>
+                  <p className="text-xs text-[#9CA3AF]">Bulk register students using a valid CSV file</p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportFile(null);
+                  setParsedRows([]);
+                  setImportResultSummary(null);
+                }}
+                disabled={isImportingBulk}
+                className="p-1.5 rounded-full text-[#9CA3AF] hover:text-[#111827] hover:bg-white transition cursor-pointer disabled:opacity-50"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 space-y-5 overflow-y-auto flex-grow">
+              
+              {/* File Selector & CSV Guide */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="md:col-span-2 space-y-2">
+                  <label className="block text-xs font-semibold text-[#6B7280] uppercase tracking-wide">
+                    Select CSV File <span className="text-red-500">*</span>
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      onChange={handleCSVFileSelect}
+                      disabled={isParsingCSV || isImportingBulk}
+                      className="block w-full text-xs text-[#374151] file:mr-3 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer border border-[#E5E7EB] rounded-xl p-1.5 bg-[#F9FAFB]"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl text-xs space-y-1">
+                  <div className="font-semibold text-[#111827] flex items-center gap-1.5">
+                    <FileText size={14} className="text-emerald-600" />
+                    <span>Expected CSV Format:</span>
+                  </div>
+                  <pre className="font-mono text-[10px] text-[#4B5563] bg-white p-2 rounded border border-[#E5E7EB] overflow-x-auto">
+{`roll_number,name,year
+274066,Arun Kumar,3
+284001,Karthik,2`}
+                  </pre>
+                  <p className="text-[10px] text-[#9CA3AF]">
+                    Supported ranges: <strong>274001–274070</strong> &amp; <strong>284001–284070</strong>
+                  </p>
+                </div>
+              </div>
+
+              {/* Error Message */}
+              {importError && (
+                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs font-medium flex items-center gap-2">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{importError}</span>
+                </div>
+              )}
+
+              {/* Success Result Summary Alert */}
+              {importResultSummary && (
+                <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-emerald-900">
+                    <CheckCircle2 size={16} className="text-emerald-600" />
+                    <span>Import Completed Successfully!</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1 font-medium text-[11px]">
+                    <span>Successfully Imported: <strong className="text-emerald-700">{importResultSummary.imported}</strong></span>
+                    <span>Already Registered: <strong>{importResultSummary.alreadyRegistered}</strong></span>
+                    <span>Duplicates: <strong>{importResultSummary.duplicates}</strong></span>
+                    <span>Invalid: <strong>{importResultSummary.invalid}</strong></span>
+                  </div>
+                </div>
+              )}
+
+              {/* Parsing Spinner */}
+              {isParsingCSV && (
+                <div className="py-8 text-center text-xs text-[#6B7280] space-y-2">
+                  <span className="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin inline-block" />
+                  <p>Parsing and validating CSV contents...</p>
+                </div>
+              )}
+
+              {/* Parsed Rows Summary Badges */}
+              {parsedRows.length > 0 && !isParsingCSV && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#F1F1F1] pb-3">
+                    <div className="text-xs font-bold text-[#111827]">
+                      CSV Preview &amp; Validation Results ({parsedRows.length} Rows)
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        Valid: {parsedRows.filter(r => r.status === 'VALID').length}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                        Already Reg: {parsedRows.filter(r => r.status === 'ALREADY REGISTERED').length}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                        Duplicates: {parsedRows.filter(r => r.status === 'DUPLICATE').length}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">
+                        Invalid: {parsedRows.filter(r => r.status === 'INVALID').length}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Preview Data Table */}
+                  <div className="overflow-x-auto max-h-64 border border-[#E5E7EB] rounded-xl">
+                    <table className="w-full text-left text-xs text-[#374151]">
+                      <thead className="bg-[#F9FAFB] text-[#6B7280] uppercase font-semibold text-[10px] tracking-wide border-b border-[#E5E7EB] sticky top-0 bg-white z-10">
+                        <tr>
+                          <th className="py-2.5 px-3 text-center w-12">Row</th>
+                          <th className="py-2.5 px-3">Roll Number</th>
+                          <th className="py-2.5 px-3">Name</th>
+                          <th className="py-2.5 px-3 text-center">Year</th>
+                          <th className="py-2.5 px-3 text-center">Status</th>
+                          <th className="py-2.5 px-3">Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F1F1]">
+                        {parsedRows.map((row) => (
+                          <tr key={row.rowNum} className="hover:bg-[#F9FAFB]">
+                            <td className="py-2 px-3 text-center font-mono text-[11px] text-[#9CA3AF]">
+                              #{row.rowNum}
+                            </td>
+                            <td className="py-2 px-3 font-mono font-semibold text-[#111827]">
+                              {row.roll_number || '—'}
+                            </td>
+                            <td className="py-2 px-3 font-medium text-[#111827]">
+                              {row.name || '—'}
+                            </td>
+                            <td className="py-2 px-3 text-center font-semibold">
+                              {row.year === 3 ? '3rd Year' : '2nd Year'}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide border ${
+                                row.status === 'VALID'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : row.status === 'ALREADY REGISTERED'
+                                  ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                  : row.status === 'DUPLICATE'
+                                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                  : 'bg-red-50 text-red-700 border-red-200'
+                              }`}>
+                                {row.status}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-[11px] text-[#6B7280]">
+                              {row.reason}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-4 border-t border-[#F1F1F1] flex items-center justify-between bg-[#F9FAFB] shrink-0">
+              <div className="text-xs text-[#6B7280] font-medium">
+                {parsedRows.filter(r => r.status === 'VALID').length > 0 ? (
+                  <span>
+                    Ready to import <strong>{parsedRows.filter(r => r.status === 'VALID').length}</strong> new valid participant(s).
+                  </span>
+                ) : (
+                  <span>Select a valid CSV file to preview.</span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImportModal(false);
+                    setImportFile(null);
+                    setParsedRows([]);
+                    setImportResultSummary(null);
+                  }}
+                  disabled={isImportingBulk}
+                  className="px-4 py-2 bg-[#F3F4F6] hover:bg-[#E5E7EB] text-xs font-semibold text-[#374151] rounded-full transition cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleBulkImportSubmit}
+                  disabled={isImportingBulk || parsedRows.filter(r => r.status === 'VALID').length === 0}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-xs font-semibold text-white rounded-full shadow-md shadow-emerald-500/25 transition-all cursor-pointer flex items-center gap-2 active:scale-[0.98]"
+                >
+                  {isImportingBulk ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                      Importing Participants...
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={14} />
+                      Import {parsedRows.filter(r => r.status === 'VALID').length} Valid Participant(s)
+                    </>
+                  )}
+                </button>
+              </div>
+
+            </div>
+
+          </div>
+        </div>
+      )}
 
       {/* FOOTER */}
       <footer className="border-t border-[#E5E7EB] py-4 px-6 text-center text-xs text-[#9CA3AF] bg-white font-medium">
