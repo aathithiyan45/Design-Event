@@ -103,6 +103,7 @@ const InstructionsPage = () => {
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
+              <img src="/assets/logo.png" alt="College Logo" className="h-14 sm:h-16 w-auto object-contain mr-2 drop-shadow-sm" />
               <span className="hidden sm:inline-flex items-center px-3.5 py-2 bg-[#F9FAFB] border border-[#E5E7EB] rounded-full font-mono text-xs font-semibold text-[#374151] whitespace-nowrap">
                 {profile?.name} ({profile?.roll_number})
               </span>

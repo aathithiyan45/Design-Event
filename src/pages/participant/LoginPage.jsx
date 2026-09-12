@@ -50,7 +50,16 @@ const LoginPage = () => {
   };
 
   return (
-    <div className="h-screen w-full overflow-hidden bg-[#F9FAFB] text-[#111827] font-sans flex flex-col lg:grid lg:grid-cols-2">
+    <div className="h-screen w-full overflow-hidden bg-[#F9FAFB] text-[#111827] font-sans flex flex-col lg:grid lg:grid-cols-2 relative">
+      {/* College Logo in top right corner */}
+      <div className="absolute top-6 right-6 sm:top-8 sm:right-10 z-30 flex items-center gap-3 pointer-events-none">
+        <img
+          src="/assets/logo.png"
+          alt="College Logo"
+          className="h-20 w-auto object-contain sm:h-24 md:h-28 drop-shadow-md transition-transform hover:scale-105"
+        />
+      </div>
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
         .font-sans { font-family: 'Inter', system-ui, sans-serif; }
