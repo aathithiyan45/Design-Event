@@ -52,13 +52,13 @@ const ProtectedRoute = ({ children, admin = false, stage = null }) => {
         return <Navigate to="/result" replace />;
       }
       
-      // Timer expiry check: 25 minutes limit (with 1 minute buffer, total 26 mins)
+      // Timer expiry check: 25 minutes limit
       if (profile?.started_at) {
         const startTime = new Date(profile.started_at).getTime();
         const currentTime = new Date().getTime();
         const duration = currentTime - startTime;
-        const maxDuration = 26 * 60 * 1000; // 26 mins in ms
-        if (duration > maxDuration) {
+        const maxDuration = 25 * 60 * 1000; // 25 mins in ms
+        if (duration >= maxDuration) {
           return <Navigate to="/result" replace />;
         }
       }
@@ -74,8 +74,8 @@ const ProtectedRoute = ({ children, admin = false, stage = null }) => {
           const startTime = new Date(profile.started_at).getTime();
           const currentTime = new Date().getTime();
           const duration = currentTime - startTime;
-          const maxDuration = 26 * 60 * 1000;
-          if (duration <= maxDuration) {
+          const maxDuration = 25 * 60 * 1000;
+          if (duration < maxDuration) {
             return <Navigate to="/challenge" replace />;
           }
         } else {

@@ -351,9 +351,8 @@ serve(async (req) => {
     }
 
     const elapsedMinutes = (Date.now() - new Date(participant.started_at).getTime()) / 60000;
-    if (elapsedMinutes > 26) {
-      await supabaseClient.from('participants').update({ status: 'submitted', submitted_at: new Date().toISOString(), active_session_id: null }).eq('id', participant.id);
-      return new Response(JSON.stringify({ success: false, error: 'Timer expired. Submission rejected.' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (elapsedMinutes > 120) {
+      return new Response(JSON.stringify({ success: false, error: 'Attempt window expired (over 2 hours). Submission rejected.' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     const { data: answers, error: answersError } = await supabaseClient

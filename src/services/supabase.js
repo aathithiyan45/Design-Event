@@ -213,10 +213,30 @@ export const submitDesignService = async (designJson, sessionId, initialDesigns)
     });
 
     if (error) {
+      // Check if the participant is already submitted in database
+      const userId = sessionStorage.getItem('design_event_user_id');
+      if (userId) {
+        const { data: p } = await supabase.from('participants').select('id, status, final_score').eq('id', userId).maybeSingle();
+        if (p?.status === 'submitted') {
+          const { submission } = await getSubmissionResult(userId);
+          if (submission) {
+            return { data: { success: true, score: submission.total_score, submissionId: submission.id, alreadySubmitted: true }, error: null };
+          }
+        }
+      }
       throw new Error(error.message || 'Evaluation service is unavailable. Please try again.');
     }
 
     if (!data || data.success !== true) {
+      if (data?.error?.includes('locked') || data?.error?.includes('already finalized')) {
+        const userId = sessionStorage.getItem('design_event_user_id');
+        if (userId) {
+          const { submission } = await getSubmissionResult(userId);
+          if (submission) {
+            return { data: { success: true, score: submission.total_score, submissionId: submission.id, alreadySubmitted: true }, error: null };
+          }
+        }
+      }
       throw new Error(data?.error || 'Evaluation failed. Please try again.');
     }
 

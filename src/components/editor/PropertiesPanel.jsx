@@ -1,7 +1,10 @@
 import React from 'react';
-import { Sliders, Layers, AlignLeft, AlignCenter, AlignRight, Type, Move, Palette } from 'lucide-react';
+import { Sliders, Layers, AlignLeft, AlignCenter, AlignRight, Type, Move, Palette, Lock } from 'lucide-react';
+import { useArrowQuota } from '../../hooks/useArrowQuota';
 
 const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSelectElement }) => {
+  const { count, isCooldownActive, remainingSeconds, consumeQuotaChange, tryConsumeArrow } = useArrowQuota();
+
   if (!selectedElement) {
     return (
       <aside className="w-72 bg-white border-l border-[#E5E7EB] p-5 flex flex-col justify-between select-none z-20 shadow-sm">
@@ -59,18 +62,18 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
     });
   };
 
-  // While typing, don't clamp on every keystroke — clamping mid-type (e.g.
-  // typing "30" when min=8) snapped the value to the min after the first
-  // digit and made it impossible to type a multi-digit number. We only
-  // clamp once the field is committed (blur / Enter).
   const handleNumericChange = (key, rawValue) => {
+    if (isCooldownActive) return;
     if (rawValue === '') {
       handleChange(key, '');
       return;
     }
     const num = parseInt(rawValue, 10);
     if (isNaN(num)) return;
-    handleChange(key, num);
+    const allowed = consumeQuotaChange();
+    if (allowed) {
+      handleChange(key, num);
+    }
   };
 
   const handleNumericBlur = (key, min, max) => {
@@ -80,37 +83,21 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
     if (clamped !== el[key]) handleChange(key, clamped);
   };
 
-  // Block the browser's native scroll-to-increment behaviour so participants
-  // can't just spin the value with the mouse wheel.
   const blockWheelIncrement = (e) => {
     e.target.blur();
   };
 
-  // Arrow-key nudge for Position/Size fields (X, Y, W, H): ArrowUp/ArrowDown
-  // moves the value by 1px, clamped to the field's min/max. Any other key
-  // (digits, letters, etc.) is blocked so the value can only change via the
-  // arrow-key nudge or by dragging on the canvas — never by typing it in.
   const nudgeWithArrowKeys = (key, min, max) => (e) => {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       const current = parseInt(el[key], 10) || 0;
-      const delta = e.key === 'ArrowUp' ? 1 : -1;
-      const next = Math.max(min, Math.min(max, current + delta));
-      handleChange(key, next);
-      return;
+      const result = tryConsumeArrow(current, min, max, e.key === 'ArrowUp');
+      if (result.allowed) {
+        handleChange(key, result.newValue);
+      }
+    } else if (e.key !== 'Tab' && e.key !== 'Shift') {
+      e.preventDefault();
     }
-
-    // Allow navigation/system keys through (Tab, Shift+Tab, Escape, browser
-    // shortcuts like Ctrl+C), block everything that would insert/edit text
-    // (digits, minus, backspace, delete, paste shortcut, etc.).
-    const allowedKeys = ['Tab', 'Escape'];
-    if (allowedKeys.includes(e.key) || e.ctrlKey || e.metaKey) return;
-    e.preventDefault();
-  };
-
-  // Blocks pasting a value directly into a locked Position/Size field.
-  const blockManualPaste = (e) => {
-    e.preventDefault();
   };
 
   return (
@@ -127,6 +114,16 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
           </span>
         </div>
 
+        {/* Cooldown / Lock Banner */}
+        {isCooldownActive && (
+          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold flex items-center justify-between shadow-sm motion-safe:animate-pulse">
+            <span className="flex items-center gap-1.5">
+              <Lock size={12} className="text-amber-600 shrink-0" />
+              <span>Arrow controls locked — {remainingSeconds}s cooldown</span>
+            </span>
+          </div>
+        )}
+
         {/* 1. POSITION */}
         <div className="space-y-2">
           <h4 className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Position</h4>
@@ -136,13 +133,10 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
               <input
                 type="number"
                 value={el.x}
-                readOnly
-                onChange={(e) => handleNumericChange('x', e.target.value)}
-                onBlur={() => handleNumericBlur('x', 0, 800)}
+                readOnly={true}
                 onWheel={blockWheelIncrement}
                 onKeyDown={nudgeWithArrowKeys('x', 0, 800)}
-                onPaste={blockManualPaste}
-                className="w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none cursor-default"
+                className={`w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
               />
             </div>
             <div className="flex items-center bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-2.5 py-1.5 focus-within:border-[#2563EB]">
@@ -150,13 +144,10 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
               <input
                 type="number"
                 value={el.y}
-                readOnly
-                onChange={(e) => handleNumericChange('y', e.target.value)}
-                onBlur={() => handleNumericBlur('y', 0, 600)}
+                readOnly={true}
                 onWheel={blockWheelIncrement}
                 onKeyDown={nudgeWithArrowKeys('y', 0, 600)}
-                onPaste={blockManualPaste}
-                className="w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none cursor-default"
+                className={`w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
               />
             </div>
           </div>
@@ -171,13 +162,10 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
               <input
                 type="number"
                 value={el.width}
-                readOnly
-                onChange={(e) => handleNumericChange('width', e.target.value)}
-                onBlur={() => handleNumericBlur('width', 5, 800)}
+                readOnly={true}
                 onWheel={blockWheelIncrement}
                 onKeyDown={nudgeWithArrowKeys('width', 5, 800)}
-                onPaste={blockManualPaste}
-                className="w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none cursor-default"
+                className={`w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
               />
             </div>
             <div className="flex items-center bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-2.5 py-1.5 focus-within:border-[#2563EB]">
@@ -185,13 +173,10 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
               <input
                 type="number"
                 value={el.height}
-                readOnly
-                onChange={(e) => handleNumericChange('height', e.target.value)}
-                onBlur={() => handleNumericBlur('height', 5, 600)}
+                readOnly={true}
                 onWheel={blockWheelIncrement}
                 onKeyDown={nudgeWithArrowKeys('height', 5, 600)}
-                onPaste={blockManualPaste}
-                className="w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none cursor-default"
+                className={`w-full bg-transparent text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
               />
             </div>
           </div>
@@ -218,15 +203,12 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
               <div>
                 <label className="block text-[10px] text-[#6B7280] mb-1 font-semibold font-mono">Size (px)</label>
                 <input
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={el.fontSize === '' ? '' : String(el.fontSize ?? 14).padStart(3, '0')}
-                  onChange={(e) => handleNumericChange('fontSize', e.target.value.replace(/\D/g, ''))}
-                  onBlur={() => handleNumericBlur('fontSize', 8, 120)}
+                  type="number"
+                  value={el.fontSize ?? ''}
+                  readOnly={true}
                   onWheel={blockWheelIncrement}
                   onKeyDown={nudgeWithArrowKeys('fontSize', 8, 120)}
-                  className="w-full bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-2.5 py-1.5 text-xs text-[#111827] font-mono font-bold focus:outline-none"
+                  className={`w-full bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-2.5 py-1.5 text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
                 />
               </div>
 
@@ -320,11 +302,10 @@ const PropertiesPanel = ({ selectedElement, onUpdateElement, elements = [], onSe
                 <input
                   type="number"
                   value={el.borderRadius || 0}
-                  onChange={(e) => handleNumericChange('borderRadius', e.target.value)}
-                  onBlur={() => handleNumericBlur('borderRadius', 0, 50)}
+                  readOnly={true}
                   onWheel={blockWheelIncrement}
                   onKeyDown={nudgeWithArrowKeys('borderRadius', 0, 50)}
-                  className="w-full bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-3 py-1.5 text-xs text-[#111827] font-mono font-bold focus:outline-none"
+                  className={`w-full bg-[#F8FAFF] border border-[#E5E7EB] rounded-xl px-3 py-1.5 text-xs text-[#111827] font-mono font-bold focus:outline-none select-none cursor-default ${isCooldownActive ? 'opacity-60' : ''}`}
                 />
               </div>
             )}

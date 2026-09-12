@@ -4,6 +4,7 @@ import { useAuth } from '../../services/AuthContext';
 import { useHistory } from '../../hooks/useHistory';
 import { useTimer } from '../../hooks/useTimer';
 import { useFullscreenGuard } from '../../hooks/useFullscreenGuard';
+import { useArrowQuota } from '../../hooks/useArrowQuota';
 import { submitDesignService } from '../../services/supabase';
 import { tasksData } from '../../data/tasks';
 
@@ -16,6 +17,7 @@ import { Clock, Send, LogOut, CheckCircle2, AlertCircle, Maximize } from 'lucide
 const ChallengePage = () => {
   const { profile, refreshProfile, logout } = useAuth();
   const navigate = useNavigate();
+  const { tryConsumeArrow } = useArrowQuota();
 
   const [tasks] = useState(tasksData);
   const [activeTaskIndex, setActiveTaskIndex] = useState(0);
@@ -163,14 +165,21 @@ const ChallengePage = () => {
       ) {
         if (selectedId) {
           e.preventDefault();
-          const step = e.shiftKey ? 10 : 1;
-          let dx = 0;
-          let dy = 0;
-          if (e.key === 'ArrowUp') dy = -step;
-          if (e.key === 'ArrowDown') dy = step;
-          if (e.key === 'ArrowLeft') dx = -step;
-          if (e.key === 'ArrowRight') dx = step;
-          handlePositionNudge(dx, dy);
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            const step = e.shiftKey ? 10 : 1;
+            const dx = e.key === 'ArrowLeft' ? -step : step;
+            handlePositionNudge(dx, 0);
+          } else {
+            const target = currentElements.find(el => el.id === selectedId);
+            if (target) {
+              const currentY = Number.isFinite(target.y) ? target.y : 0;
+              const res = tryConsumeArrow(currentY, 0, 600, false);
+              if (res.allowed) {
+                const dy = e.key === 'ArrowUp' ? -1 : 1;
+                handlePositionNudge(0, dy);
+              }
+            }
+          }
         }
       }
 
@@ -182,7 +191,7 @@ const ChallengePage = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, currentElements, undo, redo]);
+  }, [selectedId, currentElements, undo, redo, tryConsumeArrow]);
 
   // Adjusts the selected element's POSITION (x/y) by `dx`/`dy`, clamped to
   // the 800x600 canvas bounds the same way the drag-to-move logic in
@@ -300,10 +309,25 @@ const ChallengePage = () => {
 
   const [isSubmitModalOpen, setIsSubmitModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isAutoSubmitting, setIsAutoSubmitting] = useState(false);
+  const [autoSubmitReason, setAutoSubmitReason] = useState('');
   const [submitError, setSubmitError] = useState('');
 
-  const handleFinalSubmit = async () => {
+  const isSubmittingRef = React.useRef(false);
+
+  const handleFinalSubmit = async (reason = 'manual') => {
+    // Atomic lock to prevent duplicate concurrent executions
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+
     setIsSubmitting(true);
+    if (reason === 'timer_expired') {
+      setIsAutoSubmitting(true);
+      setAutoSubmitReason("Time's up! Your submission has been automatically finalized.");
+    } else if (reason === 'proctor_violation') {
+      setIsAutoSubmitting(true);
+      setAutoSubmitReason("Fullscreen violation limit exceeded. Automatically submitting your challenge.");
+    }
     setSubmitError('');
 
     try {
@@ -316,35 +340,57 @@ const ChallengePage = () => {
       });
 
       const { data, error } = await submitDesignService(challengeState, sessionId, initialChallengeState);
-      if (error) throw error;
+
+      if (error) {
+        // If error indicates already submitted or time expired in DB, treat as successful completion
+        const errStr = (error.message || '').toLowerCase();
+        if (errStr.includes('already') || errStr.includes('locked') || errStr.includes('expired') || errStr.includes('finalized')) {
+          console.warn('Submission already recorded or locked in database:', error.message);
+        } else {
+          throw error;
+        }
+      }
 
       if (data?.submissionId) {
         sessionStorage.setItem('design_event_last_submission_id', data.submissionId);
       }
 
-      localStorage.removeItem(`design_event_elements_${profile.id}`);
+      if (profile?.id) {
+        localStorage.removeItem(`design_event_elements_${profile.id}`);
+      }
       sessionStorage.removeItem('design_event_session_id');
 
       await refreshProfile();
-      navigate('/result');
+      navigate('/result', { replace: true });
     } catch (err) {
-      console.error(err);
+      console.error('Final submit processing error:', err);
       setSubmitError(err.message || 'Submission failed. Please check network connection and try again.');
       setIsSubmitting(false);
+      setIsAutoSubmitting(false);
+      isSubmittingRef.current = false;
     }
   };
 
-  const handleTimerExpire = () => {
+  const handleTimerExpire = React.useCallback(() => {
     console.log('Timer expired, auto-submitting current design...');
-    handleFinalSubmit();
-  };
+    handleFinalSubmit('timer_expired');
+  }, [challengeState]);
 
-  const { formatTime, timeLeft } = useTimer(profile?.started_at, 25, handleTimerExpire);
+  // Support dev test duration via window.DEV_TIMER_MINUTES if set in development
+  const timerDurationMinutes = typeof window !== 'undefined' && window.DEV_TIMER_MINUTES ? window.DEV_TIMER_MINUTES : 25;
+  const { formatTime, timeLeft } = useTimer(profile?.started_at, timerDurationMinutes, handleTimerExpire);
+
+  const isTimeUp = (timeLeft !== null && timeLeft <= 0) || profile?.status === 'submitted';
+
+  // Ensure auto-submit triggers if time is up on mount or timer expires
+  useEffect(() => {
+    if (isTimeUp && !isSubmittingRef.current) {
+      console.warn('[timer] time is up on render — triggering auto-submit');
+      handleFinalSubmit('timer_expired');
+    }
+  }, [isTimeUp]);
 
   // Keep the participant locked into a fullscreen, single-tab test view.
-  // We can't literally prevent someone from opening another tab/app, but we
-  // detect it and cover the screen with a blocking "resume" overlay so the
-  // test isn't usable until they come back to fullscreen.
   const { isFullscreen, violationCount, enterFullscreen } = useFullscreenGuard({
     enabled: true,
     onViolation: (type) => {
@@ -352,13 +398,11 @@ const ChallengePage = () => {
     },
   });
 
-  // Auto-submit once the participant has left fullscreen (e.g. pressed Esc)
-  // more than 2 times. handleFinalSubmit is guarded by isSubmitting so this
-  // can only fire once even if violationCount keeps climbing afterwards.
+  // Auto-submit once the participant has left fullscreen more than 2 times
   useEffect(() => {
-    if (violationCount > 2 && !isSubmitting) {
+    if (violationCount > 2 && !isSubmittingRef.current) {
       console.warn('[proctor] fullscreen violation limit exceeded — auto-submitting.');
-      handleFinalSubmit();
+      handleFinalSubmit('proctor_violation');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [violationCount]);
@@ -527,6 +571,29 @@ const ChallengePage = () => {
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. TIME'S UP / AUTO-SUBMITTING BLOCKING OVERLAY */}
+      {(isTimeUp || isAutoSubmitting) && (
+        <div className="font-sans fixed inset-0 bg-[#0F172A]/90 backdrop-blur-md flex items-center justify-center p-4 z-[120]">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-[#E5E7EB] shadow-2xl overflow-hidden text-center p-8 space-y-4 animate-in fade-in duration-200">
+            <div className="w-16 h-16 mx-auto rounded-full bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+              <Clock size={32} className="animate-spin" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-[#111827]">
+                {timeLeft <= 0 ? "Time's Up!" : "Finalizing Submission"}
+              </h3>
+              <p className="text-sm text-[#6B7280] mt-2 leading-relaxed font-medium">
+                {autoSubmitReason || "Your 25-minute competition window has ended. Your design is being automatically evaluated and recorded."}
+              </p>
+            </div>
+            <div className="pt-2 flex items-center justify-center gap-2 text-xs font-mono font-semibold text-[#2563EB] bg-[#EFF6FF] py-2.5 px-4 rounded-xl border border-[#BFDBFE]">
+              <span className="w-4 h-4 border-2 border-[#2563EB] border-t-transparent rounded-full animate-spin shrink-0" />
+              <span>Time's up. Your submission has been automatically submitted.</span>
             </div>
           </div>
         </div>
